@@ -1,0 +1,199 @@
+---
+title: "Individual Code"
+author: "Ying Chen"
+date: "2026-04-21"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+fromJSON("data_raw/archive/stations.json")
+
+library(jsonlite)
+list.files("data_raw", recursive = TRUE)
+```
+
+```{r}
+set.seed(6414)
+```
+
+#load rail road file
+
+```{r load-stations}
+stations_raw <- fromJSON("data_raw/archive/stations.json")
+
+stations_features <- stations_raw$features
+stations_df <- stations_features$properties
+
+head(stations_df)
+dim(stations_df)
+colnames(stations_df)
+```
+# Clean the station data
+```{r clean-stations}
+# Remove rows with missing state
+stations_df <- stations_df[!is.na(stations_df$state), ]
+
+# Remove fake stations (codes starting with "XX" or "YY")
+stations_df <- stations_df[!grepl("^XX|^YY", stations_df$code), ]
+
+# Check results
+dim(stations_df)
+head(stations_df)
+```
+#Create your RAS variable
+```{r create-ras}
+# Count stations per state
+station_count_state <- aggregate(code ~ state, data = stations_df, FUN = length)
+colnames(station_count_state)[2] <- "station_count"
+
+# Create log-based RAS proxy
+station_count_state$log_station <- log(station_count_state$station_count)
+
+# Check
+summary(station_count_state$log_station)
+head(station_count_state)
+```
+# Next, Bring in population and terrain. 
+ Preliminary state-level rail accessibility model
+Limitation: this model aggregates station data to the state level.
+Our final analysis will use station-level RAS and district-level aggregation.
+```{r load-predictors}
+# Load population
+pop <- read.csv("data_raw/2011 Population Census Abstract/pc11_pca_clean_pc11dist.csv")
+
+# Load TRI
+tri <- read.csv("data_raw/Terrain Ruggedness Index (TRI)/tri_pc11dist.csv")
+
+# Keep needed columns
+pop_small <- pop[, c("pc11_state_id", "pc11_pca_tot_p")]
+tri_small <- tri[, c("pc11_state_id", "tri_mean")]
+
+# Aggregate to state level
+pop_state <- aggregate(pc11_pca_tot_p ~ pc11_state_id, data = pop_small, sum)
+tri_state <- aggregate(tri_mean ~ pc11_state_id, data = tri_small, mean)
+
+# Create log population
+pop_state$log_pop <- log(pop_state$pc11_pca_tot_p)
+
+# Check
+head(pop_state)
+head(tri_state)
+```
+#create state lookup table
+```{r state-lookup}
+state_lookup <- data.frame(
+  pc11_state_id = 1:35,
+  state = c(
+    "", "Andhra Pradesh", "Assam", "Bihar", "Chandigarh",
+    "Chhattisgarh", "Delhi NCT", "Goa", "Gujarat", "Haryana",
+    "Himachal Pradesh", "Jammu and Kashmir", "Jharkhand", "Karnataka",
+    "Kerala", "Madhya Pradesh", "Maharashtra", "Mizoram", "Nagaland",
+    "Odisha", "Orissa", "Puducherry", "Punjab", "Rajasthan",
+    "Tamil Nadu", "Tripura", "Uttar Pradesh", "Uttarakhand",
+    "West Bengal", NA, NA, NA, NA, NA, NA
+  )
+)
+
+head(state_lookup, 10)
+dim(state_lookup)
+```
+#merge population + terrain + state names
+```{r merge-predictors}
+# Merge population and terrain by state ID
+state_predictors <- merge(pop_state, tri_state, by = "pc11_state_id")
+
+# Add state names
+state_predictors <- merge(state_predictors, state_lookup, by = "pc11_state_id")
+
+# Check
+head(state_predictors)
+dim(state_predictors)
+```
+#merge railway response with predictors
+```{r final-model-data}
+# Remove invalid/non-India rows before merge
+station_count_state <- station_count_state[!is.na(station_count_state$state), ]
+station_count_state <- station_count_state[station_count_state$state != "", ]
+station_count_state <- station_count_state[station_count_state$state != "Bangladesh", ]
+
+# Merge RAS response with state predictors
+model_data <- merge(station_count_state, state_predictors, by = "state")
+
+# Check final model data
+head(model_data)
+dim(model_data)
+colnames(model_data)
+summary(model_data)
+```
+# Now, my model_data is ready.
+```{r fit-model}
+# Fit baseline rail accessibility model
+rail_model <- lm(
+  log_station ~ log_pop + tri_mean,
+  data = model_data
+)
+
+summary(rail_model)
+```
+# summary from above: 
+The regression results do not show statistically significant relationships between population size, terrain ruggedness, and railway station density at the state level. This suggests that variation in railway access is not well explained by these aggregate factors alone.
+
+#one clean figure for report
+```{r}
+simple_model <- lm(log_station ~ log_pop, data = model_data)
+
+plot(model_data$log_pop, model_data$log_station,
+     xlab = "Log Population",
+     ylab = "Log Stations",
+     main = "Population vs Railway Stations")
+
+abline(simple_model, col = "red")
+```
+#The scatter plot shows a weak negative relationship between population size and the number of railway stations. While the fitted line slopes downward, indicating that more populous states tend to have relatively fewer stations, the relationship is highly dispersed, suggesting substantial unexplained variation.
+
+```{r}
+plot(rail_model)
+```
+#summary:
+Linearity (Residuals vs Fitted): does not exhibit a strong systematic pattern, suggesting that the linearity assumption is reasonably satisfied, although slight curvature indicates potential mild nonlinearity.
+Normality (Q-Q Plot): indicates approximate normality of residuals, though deviations at the tails suggest departures from normality for extreme observations.
+Homoskedasticity (Scale-Location): the plot suggests that residual variance is relatively stable across fitted values, with only minor heteroskedasticity present.
+Influence / Outliers (Leverage + Cook’s Distance): identifies a small number of moderately influential observations; however, no points exceed conventional Cook’s distance thresholds, indicating that no single observation unduly influences the model estimates.
+
+Overall: while minor deviations from ideal assumptions are present, the diagnostic results do not indicate severe violations, and the model is considered adequate for exploratory analysis.
+
+
+#Summary: 
+The model exhibits very low explanatory power (R² ≈ 0.02), and the overall F-test fails to reject the null hypothesis that all coefficients are jointly zero (p = 0.76). Neither population nor terrain ruggedness is statistically significant. This suggests that the current specification is insufficient to explain variation in railway station distribution. Despite the low predictive power, the residuals still provide a preliminary indication of mismatch between observed and expected rail supply. However, given the poor model fit, these residuals should not be interpreted as reliable measures of rail adequacy. Future improvements would include incorporating additional predictors such as GDP per capita, population density, and connectivity measures, as well as exploring alternative model forms. These variables are expected to better capture structural demand for railway infrastructure.
+
+```{r}
+set.seed(6414)
+
+# Split data into 80% training and 20% testing
+train_index <- sample(seq_len(nrow(model_data)), size = 0.8 * nrow(model_data))
+
+train_data <- model_data[train_index, ]
+test_data  <- model_data[-train_index, ]
+
+# Fit model on training data
+train_model <- lm(log_station ~ log_pop + tri_mean, data = train_data)
+
+# Predict on test data
+test_pred <- predict(train_model, newdata = test_data)
+
+# Evaluate performance
+rmse <- sqrt(mean((test_data$log_station - test_pred)^2))
+mae  <- mean(abs(test_data$log_station - test_pred))
+
+rmse
+mae
+```
+#The out-of-sample performance indicates relatively high prediction error (RMSE ≈ 1.58, MAE ≈ 1.37), consistent with the low explanatory power observed in the regression model.
+```{r}
+train_index <- sample(seq_len(nrow(model_data)))
+train_index <- train_index[1:floor(0.8 * nrow(model_data))]
+```
+
+```{r}
+write.csv(model_data, "final_state_dataset.csv", row.names = FALSE)
+```
